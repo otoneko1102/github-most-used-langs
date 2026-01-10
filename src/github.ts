@@ -1,10 +1,22 @@
-import { GitHubRepo, GitHubLanguages, GitHubColors, LanguageStats, LanguageData, RateLimitError } from './types'
+import {
+  GitHubRepo,
+  GitHubLanguages,
+  GitHubColors,
+  GitHubUser,
+  GitHubCommit,
+  LanguageData,
+  RateLimitError,
+  Profile,
+  CommitActivity,
+  ApiResponse,
+} from './types'
 import { logger } from './logger'
 
 const GITHUB_API_BASE = 'https://api.github.com'
 const GITHUB_COLORS_URL = 'https://raw.githubusercontent.com/ozh/github-colors/master/colors.json'
 const DEFAULT_COLOR = '#8b8b8b'
 const PER_PAGE = 100
+const COMMIT_WINDOW_DAYS = 30
 
 let colorsCache: GitHubColors | null = null
 let colorsCacheTime = 0
@@ -116,65 +128,69 @@ async function fetchAllRepos(username: string, token?: string, includePrivate = 
   return repos
 }
 
-export async function fetchLanguageStats(username: string, token?: string, includePrivate = false): Promise<LanguageStats> {
-  const startTime = Date.now()
-  logger.info('Starting language stats fetch', { username })
+async function fetchUserProfile(username: string, token?: string): Promise<GitHubUser> {
+  const headers = getHeaders(token)
+  const url = `${GITHUB_API_BASE}/users/${encodeURIComponent(username)}`
+  const response = await fetch(url, { headers })
+  await checkResponse(response)
+  return (await response.json()) as GitHubUser
+}
 
-  const colors = await fetchGitHubColors()
+async function fetchRepoCommitsSince(
+  owner: string,
+  repo: string,
+  since: string,
+  token?: string
+): Promise<GitHubCommit[]> {
+  const headers = getHeaders(token)
+  const commits: GitHubCommit[] = []
+  let page = 1
 
-  const repos = await fetchAllRepos(username, token, includePrivate)
+  while (true) {
+    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?since=${since}&per_page=${PER_PAGE}&page=${page}`
+    const response = await fetch(url, { headers })
 
-  const languageBytes: Record<string, number> = {}
-  let totalBytes = 0
-
-  for (const repo of repos) {
-    if (repo.fork) {
-      continue
+    if (response.status === 409) {
+      return []
     }
 
-    try {
-      const languages = await fetchRepoLanguages(repo.languages_url, token)
+    await checkResponse(response)
+    const pageCommits = (await response.json()) as GitHubCommit[]
 
-      for (const [lang, bytes] of Object.entries(languages)) {
-        languageBytes[lang] = (languageBytes[lang] || 0) + bytes
-        totalBytes += bytes
-      }
-    } catch (error) {
-      if ((error as RateLimitError).retryAfter !== undefined || (error as RateLimitError).resetTime !== undefined) {
-        throw error
-      }
-      logger.warn('Failed to fetch languages for repo', { repo: repo.full_name, error: String(error) })
+    if (pageCommits.length === 0) break
+
+    commits.push(...pageCommits)
+    page++
+
+    if (page > 10) break
+  }
+
+  return commits
+}
+
+function buildCommitActivity(commits: GitHubCommit[], windowDays: number): CommitActivity[] {
+  const today = new Date()
+  today.setUTCHours(0, 0, 0, 0)
+
+  const dateMap: Record<string, number> = {}
+
+  for (let i = 0; i < windowDays; i++) {
+    const d = new Date(today)
+    d.setUTCDate(d.getUTCDate() - (windowDays - 1 - i))
+    const dateStr = d.toISOString().slice(0, 10)
+    dateMap[dateStr] = 0
+  }
+
+  for (const commit of commits) {
+    const dateStr = commit.commit.author.date.slice(0, 10)
+    if (dateStr in dateMap) {
+      dateMap[dateStr]++
     }
-
-    await new Promise(resolve => setTimeout(resolve, 50))
   }
 
-  const languages: LanguageData[] = Object.entries(languageBytes)
-    .map(([name, bytes]) => ({
-      name,
-      bytes,
-      percentage: totalBytes > 0 ? Math.round((bytes / totalBytes) * 10000) / 100 : 0,
-      color: getLanguageColor(name, colors),
-    }))
-    .sort((a, b) => b.bytes - a.bytes)
-
-  const generatedAt = new Date().toISOString()
-  const elapsed = Date.now() - startTime
-
-  logger.info('Language stats fetch completed', {
-    username,
-    totalBytes,
-    languageCount: languages.length,
-    elapsedMs: elapsed,
-  })
-
-  return {
-    username,
-    totalBytes,
-    generatedAt,
-    cached: false,
-    languages,
-  }
+  return Object.entries(dateMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, count]) => ({ date, count }))
 }
 
 async function fetchRepoLanguages(languagesUrl: string, token?: string): Promise<GitHubLanguages> {
@@ -210,6 +226,102 @@ async function fetchGitHubColors(): Promise<GitHubColors> {
 function getLanguageColor(language: string, colors: GitHubColors): string {
   const colorData = colors[language]
   return colorData?.color || DEFAULT_COLOR
+}
+
+export async function fetchFullStats(
+  username: string,
+  token?: string,
+  includePrivate = false,
+  ttlSeconds = 3600
+): Promise<ApiResponse> {
+  const startTime = Date.now()
+  logger.info('Starting full stats fetch', { username })
+
+  const [userProfile, colors, repos] = await Promise.all([
+    fetchUserProfile(username, token),
+    fetchGitHubColors(),
+    fetchAllRepos(username, token, includePrivate),
+  ])
+
+  let totalStars = 0
+  const languageBytes: Record<string, number> = {}
+  let totalBytes = 0
+  const allCommits: GitHubCommit[] = []
+
+  const sinceDate = new Date()
+  sinceDate.setUTCDate(sinceDate.getUTCDate() - COMMIT_WINDOW_DAYS)
+  const sinceISO = sinceDate.toISOString()
+
+  for (const repo of repos) {
+    totalStars += repo.stargazers_count || 0
+
+    if (repo.fork) continue
+
+    try {
+      const languages = await fetchRepoLanguages(repo.languages_url, token)
+      for (const [lang, bytes] of Object.entries(languages)) {
+        languageBytes[lang] = (languageBytes[lang] || 0) + bytes
+        totalBytes += bytes
+      }
+    } catch (error) {
+      if (isRateLimitError(error)) throw error
+      logger.warn('Failed to fetch languages for repo', { repo: repo.full_name, error: String(error) })
+    }
+
+    try {
+      const commits = await fetchRepoCommitsSince(repo.owner.login, repo.name, sinceISO, token)
+      allCommits.push(...commits)
+    } catch (error) {
+      if (isRateLimitError(error)) throw error
+      logger.warn('Failed to fetch commits for repo', { repo: repo.full_name, error: String(error) })
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
+  const languages: LanguageData[] = Object.entries(languageBytes)
+    .map(([name, bytes]) => ({
+      name,
+      bytes,
+      percentage: totalBytes > 0 ? Math.round((bytes / totalBytes) * 10000) / 100 : 0,
+      color: getLanguageColor(name, colors),
+    }))
+    .sort((a, b) => b.bytes - a.bytes)
+
+  const commitActivity = buildCommitActivity(allCommits, COMMIT_WINDOW_DAYS)
+
+  const fetchedAt = new Date().toISOString()
+  const elapsed = Date.now() - startTime
+
+  const profile: Profile = {
+    login: userProfile.login,
+    html_url: userProfile.html_url,
+    avatar_url: userProfile.avatar_url,
+    followers: userProfile.followers,
+    public_repos: userProfile.public_repos,
+    total_stars: totalStars,
+    fetched_at: fetchedAt,
+  }
+
+  logger.info('Full stats fetch completed', {
+    username,
+    totalBytes,
+    languageCount: languages.length,
+    totalStars,
+    commitCount: allCommits.length,
+    elapsedMs: elapsed,
+  })
+
+  return {
+    profile,
+    languages,
+    commit_activity: commitActivity,
+    meta: {
+      cached: false,
+      cached_at: fetchedAt,
+      ttl_seconds: ttlSeconds,
+    },
+  }
 }
 
 export function isRateLimitError(error: unknown): error is RateLimitError {

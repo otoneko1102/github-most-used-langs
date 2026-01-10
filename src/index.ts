@@ -3,9 +3,9 @@ import express, { Request, Response } from 'express'
 import cors from 'cors'
 import { loadConfig } from './config'
 import { CacheManager } from './cache'
-import { fetchLanguageStats, isRateLimitError } from './github'
+import { fetchFullStats, isRateLimitError } from './github'
 import { logger } from './logger'
-import { LanguageStats, RateLimitError } from './types'
+import { ApiResponse, RateLimitError } from './types'
 
 const config = loadConfig()
 const cache = new CacheManager(config.cacheTtlSeconds)
@@ -30,6 +30,17 @@ app.use((req, res, next) => {
   next()
 })
 
+function withCachedMeta(data: ApiResponse, remainingTtl: number): ApiResponse {
+  return {
+    ...data,
+    meta: {
+      ...data.meta,
+      cached: true,
+      ttl_seconds: remainingTtl,
+    },
+  }
+}
+
 app.get('/', async (req: Request, res: Response) => {
   if (!config.githubUsername) {
     logger.error('GITHUB_USERNAME not set')
@@ -41,7 +52,8 @@ app.get('/', async (req: Request, res: Response) => {
   const validCache = cache.getValidCache(key)
   if (validCache) {
     logger.info('Cache hit', { key })
-    return res.json({ ...validCache, cached: true })
+    const remainingTtl = cache.getRemainingTtl(key)
+    return res.json(withCachedMeta(validCache, remainingTtl))
   }
 
   const existingFlight = cache.getInFlight(key)
@@ -49,12 +61,12 @@ app.get('/', async (req: Request, res: Response) => {
     logger.info('Waiting for in-flight request', { key })
     try {
       const data = await existingFlight
-      return res.json({ ...data, cached: false })
+      return res.json(data)
     } catch (error) {
       const staleCache = cache.get(key)
       if (staleCache) {
         logger.warn('In-flight failed, returning stale cache', { key })
-        return res.json({ ...staleCache, cached: true })
+        return res.json(withCachedMeta(staleCache, 0))
       }
     }
   }
@@ -64,9 +76,14 @@ app.get('/', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'INCLUDE_PRIVATE set but GITHUB_TOKEN not provided' })
   }
 
-  const fetchPromise = (async (): Promise<LanguageStats> => {
+  const fetchPromise = (async (): Promise<ApiResponse> => {
     try {
-      const stats = await fetchLanguageStats(config.githubUsername, config.githubToken, config.includePrivate)
+      const stats = await fetchFullStats(
+        config.githubUsername,
+        config.githubToken,
+        config.includePrivate,
+        config.cacheTtlSeconds
+      )
       cache.set(key, stats)
       return stats
     } finally {
@@ -79,7 +96,7 @@ app.get('/', async (req: Request, res: Response) => {
 
   try {
     const data = await fetchPromise
-    return res.json({ ...data, cached: false })
+    return res.json(data)
   } catch (error) {
     if (isRateLimitError(error)) {
       const rateLimitError = error as RateLimitError
@@ -91,7 +108,7 @@ app.get('/', async (req: Request, res: Response) => {
       const staleCache = cache.get(key)
       if (staleCache) {
         logger.warn('Rate limited, returning stale cache', { key })
-        return res.json({ ...staleCache, cached: true })
+        return res.json(withCachedMeta(staleCache, 0))
       }
 
       if (rateLimitError.retryAfter) {
@@ -109,10 +126,10 @@ app.get('/', async (req: Request, res: Response) => {
     const staleCache = cache.get(key)
     if (staleCache) {
       logger.warn('Fetch failed, returning stale cache', { key })
-      return res.json({ ...staleCache, cached: true })
+      return res.json(withCachedMeta(staleCache, 0))
     }
 
-    return res.status(503).json({ error: 'Failed to fetch GitHub data' })
+    return res.status(500).json({ error: 'Failed to fetch GitHub data' })
   }
 })
 
