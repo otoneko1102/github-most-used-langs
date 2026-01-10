@@ -4,6 +4,7 @@ export interface Config {
   githubToken: string | undefined
   cacheTtlSeconds: number
   allowedOrigins: string
+  includePrivate: boolean
 }
 
 export function loadConfig(): Config {
@@ -13,5 +14,6 @@ export function loadConfig(): Config {
     githubToken: process.env.GITHUB_TOKEN,
     cacheTtlSeconds: Number(process.env.CACHE_TTL_SECONDS) || 3600,
     allowedOrigins: process.env.ALLOWED_ORIGINS || '*',
+    includePrivate: process.env.INCLUDE_PRIVATE === 'true' || process.env.INCLUDE_PRIVATE === '1',
   }
 }

@@ -59,9 +59,14 @@ app.get('/', async (req: Request, res: Response) => {
     }
   }
 
+  if (config.includePrivate && !config.githubToken) {
+    logger.error('INCLUDE_PRIVATE set but GITHUB_TOKEN not provided')
+    return res.status(400).json({ error: 'INCLUDE_PRIVATE set but GITHUB_TOKEN not provided' })
+  }
+
   const fetchPromise = (async (): Promise<LanguageStats> => {
     try {
-      const stats = await fetchLanguageStats(config.githubUsername, config.githubToken)
+      const stats = await fetchLanguageStats(config.githubUsername, config.githubToken, config.includePrivate)
       cache.set(key, stats)
       return stats
     } finally {

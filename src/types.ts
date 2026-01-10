@@ -24,6 +24,7 @@ export interface GitHubRepo {
   full_name: string
   fork: boolean
   languages_url: string
+  owner: { login: string }
 }
 
 export interface GitHubLanguages {

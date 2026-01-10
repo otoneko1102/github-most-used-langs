@@ -50,10 +50,45 @@ async function checkResponse(response: Response): Promise<void> {
   }
 }
 
-async function fetchAllRepos(username: string, token?: string): Promise<GitHubRepo[]> {
+async function fetchAllRepos(username: string, token?: string, includePrivate = false): Promise<GitHubRepo[]> {
   const repos: GitHubRepo[] = []
   let page = 1
   const headers = getHeaders(token)
+
+  if (includePrivate && token) {
+    const userResp = await fetch(`${GITHUB_API_BASE}/user`, { headers })
+    await checkResponse(userResp)
+    const authUser = (await userResp.json()) as { login?: string }
+    if (authUser?.login === username) {
+      while (true) {
+        const url = `${GITHUB_API_BASE}/user/repos?per_page=${PER_PAGE}&page=${page}&visibility=all`
+        logger.debug('Fetching user repos page', { page, url })
+
+        const response = await fetch(url, { headers })
+        await checkResponse(response)
+
+        const pageRepos = (await response.json()) as GitHubRepo[]
+        const owned = pageRepos.filter(r => r.owner?.login === username)
+
+        if (owned.length === 0) {
+          break
+        }
+
+        repos.push(...owned)
+        page++
+
+        if (page > 20) {
+          logger.warn('Reached maximum page limit', { totalRepos: repos.length })
+          break
+        }
+      }
+
+      logger.info('Fetched all repos (including private)', { count: repos.length })
+      return repos
+    }
+
+    logger.warn('INCLUDE_PRIVATE requested but token owner does not match username; falling back to public repos', { username, tokenOwner: authUser?.login })
+  }
 
   while (true) {
     const url = `${GITHUB_API_BASE}/users/${encodeURIComponent(username)}/repos?per_page=${PER_PAGE}&page=${page}&type=owner`
@@ -81,48 +116,13 @@ async function fetchAllRepos(username: string, token?: string): Promise<GitHubRe
   return repos
 }
 
-async function fetchRepoLanguages(languagesUrl: string, token?: string): Promise<GitHubLanguages> {
-  const headers = getHeaders(token)
-  const response = await fetch(languagesUrl, { headers })
-  await checkResponse(response)
-  return (await response.json()) as GitHubLanguages
-}
-
-async function fetchGitHubColors(): Promise<GitHubColors> {
-  const now = Date.now()
-
-  if (colorsCache && now - colorsCacheTime < COLORS_CACHE_TTL) {
-    return colorsCache
-  }
-
-  try {
-    logger.debug('Fetching GitHub colors')
-    const response = await fetch(GITHUB_COLORS_URL)
-    if (!response.ok) {
-      throw new Error(`Failed to fetch colors: ${response.status}`)
-    }
-    colorsCache = (await response.json()) as GitHubColors
-    colorsCacheTime = now
-    logger.info('Fetched GitHub colors', { count: Object.keys(colorsCache).length })
-    return colorsCache
-  } catch (error) {
-    logger.warn('Failed to fetch GitHub colors, using cached or empty', { error: String(error) })
-    return colorsCache || {}
-  }
-}
-
-function getLanguageColor(language: string, colors: GitHubColors): string {
-  const colorData = colors[language]
-  return colorData?.color || DEFAULT_COLOR
-}
-
-export async function fetchLanguageStats(username: string, token?: string): Promise<LanguageStats> {
+export async function fetchLanguageStats(username: string, token?: string, includePrivate = false): Promise<LanguageStats> {
   const startTime = Date.now()
   logger.info('Starting language stats fetch', { username })
 
   const colors = await fetchGitHubColors()
 
-  const repos = await fetchAllRepos(username, token)
+  const repos = await fetchAllRepos(username, token, includePrivate)
 
   const languageBytes: Record<string, number> = {}
   let totalBytes = 0
@@ -175,6 +175,41 @@ export async function fetchLanguageStats(username: string, token?: string): Prom
     cached: false,
     languages,
   }
+}
+
+async function fetchRepoLanguages(languagesUrl: string, token?: string): Promise<GitHubLanguages> {
+  const headers = getHeaders(token)
+  const response = await fetch(languagesUrl, { headers })
+  await checkResponse(response)
+  return (await response.json()) as GitHubLanguages
+}
+
+async function fetchGitHubColors(): Promise<GitHubColors> {
+  const now = Date.now()
+
+  if (colorsCache && now - colorsCacheTime < COLORS_CACHE_TTL) {
+    return colorsCache
+  }
+
+  try {
+    logger.debug('Fetching GitHub colors')
+    const response = await fetch(GITHUB_COLORS_URL)
+    if (!response.ok) {
+      throw new Error(`Failed to fetch colors: ${response.status}`)
+    }
+    colorsCache = (await response.json()) as GitHubColors
+    colorsCacheTime = now
+    logger.info('Fetched GitHub colors', { count: Object.keys(colorsCache).length })
+    return colorsCache
+  } catch (error) {
+    logger.warn('Failed to fetch GitHub colors, using cached or empty', { error: String(error) })
+    return colorsCache || {}
+  }
+}
+
+function getLanguageColor(language: string, colors: GitHubColors): string {
+  const colorData = colors[language]
+  return colorData?.color || DEFAULT_COLOR
 }
 
 export function isRateLimitError(error: unknown): error is RateLimitError {

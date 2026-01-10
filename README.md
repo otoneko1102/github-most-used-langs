@@ -19,6 +19,7 @@ A simple HTTP API that aggregates byte counts per language across a GitHub user'
 | `PORT` | - | `3086` | Server port |
 | `CACHE_TTL_SECONDS` | - | `3600` | Cache TTL in seconds |
 | `ALLOWED_ORIGINS` | - | `*` | Allowed CORS origins (comma-separated) |
+| `INCLUDE_PRIVATE` | - | `false` | Include private repositories (requires `GITHUB_TOKEN` and must be the same user) |
 
 ## Setup
 
