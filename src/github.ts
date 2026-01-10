@@ -295,6 +295,7 @@ export async function fetchFullStats(
 
   const profile: Profile = {
     login: userProfile.login,
+    name: userProfile.name,
     html_url: userProfile.html_url,
     avatar_url: userProfile.avatar_url,
     followers: userProfile.followers,

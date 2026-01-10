@@ -7,6 +7,7 @@ export interface LanguageData {
 
 export interface Profile {
   login: string
+  name: string | null
   html_url: string
   avatar_url: string
   followers: number
@@ -50,6 +51,7 @@ export interface GitHubRepo {
 
 export interface GitHubUser {
   login: string
+  name: string | null
   html_url: string
   avatar_url: string
   followers: number
