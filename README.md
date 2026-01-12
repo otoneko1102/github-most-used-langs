@@ -5,8 +5,9 @@ A simple HTTP API that aggregates byte counts per language across a GitHub user'
 ## Features
 
 - Implemented in **TypeScript** + **Express**
+- **Scheduled data fetching** (daily at 00:00 and 12:00 JST) for fast responses
+- **Persistent file-based cache** for data preservation across restarts
 - Server-side calculation of language usage percentages
-- 1-hour cache (configurable)
 - Rate-limit-aware implementation for the GitHub API
 - `stale-if-error` behavior to preserve availability using stale cache on errors
 
@@ -15,9 +16,11 @@ A simple HTTP API that aggregates byte counts per language across a GitHub user'
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GITHUB_USERNAME` | ✅ | - | GitHub username to aggregate |
+| `TARGET_USERNAMES` | - | `GITHUB_USERNAME` | Comma-separated list of GitHub usernames for scheduled fetching |
 | `GITHUB_TOKEN` | - | - | GitHub Personal Access Token (recommended to ease rate limits) |
 | `PORT` | - | `3086` | Server port |
 | `CACHE_TTL_SECONDS` | - | `3600` | Cache TTL in seconds |
+| `CACHE_DIR` | - | `./cache` | Directory for cache file storage |
 | `ALLOWED_ORIGINS` | - | `*` | Allowed CORS origins (comma-separated) |
 | `INCLUDE_PRIVATE` | - | `false` | Include private repositories (requires `GITHUB_TOKEN` and must be the same user) |
 
@@ -89,6 +92,24 @@ Error responses:
 A simple health check endpoint.
 
 Response: `ok`
+
+## How It Works
+
+### Scheduled Data Fetching
+
+The server automatically fetches data for all users listed in `TARGET_USERNAMES` (or `GITHUB_USERNAME` if not set) at:
+- **00:00 JST** (15:00 UTC previous day)
+- **12:00 JST** (03:00 UTC)
+- **On server startup**
+
+The fetched data is:
+1. Stored in memory cache
+2. Persisted to disk in the `CACHE_DIR` directory
+3. Loaded on server restart for immediate availability
+
+### On-Demand Fetching
+
+If requested data is not in cache or cache is expired, the API will fetch data from GitHub on-demand.
 
 ## Deployment
 

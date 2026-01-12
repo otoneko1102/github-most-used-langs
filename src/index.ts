@@ -6,9 +6,14 @@ import { CacheManager } from './cache'
 import { fetchFullStats, isRateLimitError } from './github'
 import { logger } from './logger'
 import { ApiResponse, RateLimitError } from './types'
+import { DataScheduler } from './scheduler'
 
 const config = loadConfig()
-const cache = new CacheManager(config.cacheTtlSeconds)
+const cache = new CacheManager(config.cacheTtlSeconds, config.cacheDir)
+const scheduler = new DataScheduler(config, cache)
+
+cache.loadAllFromDisk()
+scheduler.start()
 
 const app = express()
 
@@ -85,6 +90,7 @@ app.get('/', async (req: Request, res: Response) => {
         config.cacheTtlSeconds
       )
       cache.set(key, stats)
+      cache.saveToDisk(key)
       return stats
     } finally {
       cache.clearInFlight(key)
