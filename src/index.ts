@@ -1,39 +1,48 @@
-import 'dotenv/config'
-import express, { Request, Response } from 'express'
-import cors from 'cors'
-import { loadConfig } from './config'
-import { CacheManager } from './cache'
-import { fetchFullStats, isRateLimitError } from './github'
-import { logger } from './logger'
-import { ApiResponse, RateLimitError } from './types'
-import { DataScheduler } from './scheduler'
+import "dotenv/config";
+import express, { Request, Response } from "express";
+import cors from "cors";
+import compression from "compression";
+import crypto from "crypto";
+import { loadConfig } from "./config";
+import { CacheManager } from "./cache";
+import { fetchFullStats, isRateLimitError } from "./github";
+import { logger } from "./logger";
+import { ApiResponse, RateLimitError } from "./types";
+import { DataScheduler } from "./scheduler";
 
-const config = loadConfig()
-const cache = new CacheManager(config.cacheTtlSeconds, config.cacheDir)
-const scheduler = new DataScheduler(config, cache)
+const config = loadConfig();
+const cache = new CacheManager(config.cacheTtlSeconds, config.cacheDir);
+const scheduler = new DataScheduler(config, cache);
 
-cache.loadAllFromDisk()
-scheduler.start()
+cache.loadAllFromDisk();
+scheduler.start();
 
-const app = express()
+const app = express();
 
-app.use(cors({ origin: config.allowedOrigins === '*' ? '*' : config.allowedOrigins.split(',') }))
+app.use(compression());
 
-app.use(express.json())
+app.use(
+  cors({
+    origin:
+      config.allowedOrigins === "*" ? "*" : config.allowedOrigins.split(","),
+  }),
+);
+
+app.use(express.json());
 
 app.use((req, res, next) => {
-  const start = Date.now()
-  res.on('finish', () => {
-    const elapsed = Date.now() - start
-    logger.info('Request completed', {
+  const start = Date.now();
+  res.on("finish", () => {
+    const elapsed = Date.now() - start;
+    logger.info("Request completed", {
       method: req.method,
       path: req.path,
       status: res.statusCode,
       elapsedMs: elapsed,
-    })
-  })
-  next()
-})
+    });
+  });
+  next();
+});
 
 function withCachedMeta(data: ApiResponse, remainingTtl: number): ApiResponse {
   return {
@@ -43,42 +52,62 @@ function withCachedMeta(data: ApiResponse, remainingTtl: number): ApiResponse {
       cached: true,
       ttl_seconds: remainingTtl,
     },
-  }
+  };
 }
 
-app.get('/', async (req: Request, res: Response) => {
+function generateETag(data: ApiResponse): string {
+  const hash = crypto
+    .createHash("md5")
+    .update(JSON.stringify(data))
+    .digest("hex");
+  return `"${hash}"`;
+}
+
+app.get("/", async (req: Request, res: Response) => {
   if (!config.githubUsername) {
-    logger.error('GITHUB_USERNAME not set')
-    return res.status(400).json({ error: 'GITHUB_USERNAME not set' })
+    logger.error("GITHUB_USERNAME not set");
+    return res.status(400).json({ error: "GITHUB_USERNAME not set" });
   }
 
-  const key = config.githubUsername
+  const key = config.githubUsername;
 
-  const validCache = cache.getValidCache(key)
+  const validCache = cache.getValidCache(key);
   if (validCache) {
-    logger.info('Cache hit', { key })
-    const remainingTtl = cache.getRemainingTtl(key)
-    return res.json(withCachedMeta(validCache, remainingTtl))
+    logger.info("Cache hit", { key });
+    const remainingTtl = cache.getRemainingTtl(key);
+    const response = withCachedMeta(validCache, remainingTtl);
+
+    const etag = generateETag(response);
+    res.set("ETag", etag);
+    res.set("Cache-Control", `public, max-age=${remainingTtl}`);
+
+    if (req.headers["if-none-match"] === etag) {
+      return res.status(304).send();
+    }
+
+    return res.json(response);
   }
 
-  const existingFlight = cache.getInFlight(key)
+  const existingFlight = cache.getInFlight(key);
   if (existingFlight) {
-    logger.info('Waiting for in-flight request', { key })
+    logger.info("Waiting for in-flight request", { key });
     try {
-      const data = await existingFlight
-      return res.json(data)
+      const data = await existingFlight;
+      return res.json(data);
     } catch (error) {
-      const staleCache = cache.get(key)
+      const staleCache = cache.get(key);
       if (staleCache) {
-        logger.warn('In-flight failed, returning stale cache', { key })
-        return res.json(withCachedMeta(staleCache, 0))
+        logger.warn("In-flight failed, returning stale cache", { key });
+        return res.json(withCachedMeta(staleCache, 0));
       }
     }
   }
 
   if (config.includePrivate && !config.githubToken) {
-    logger.error('INCLUDE_PRIVATE set but GITHUB_TOKEN not provided')
-    return res.status(400).json({ error: 'INCLUDE_PRIVATE set but GITHUB_TOKEN not provided' })
+    logger.error("INCLUDE_PRIVATE set but GITHUB_TOKEN not provided");
+    return res
+      .status(400)
+      .json({ error: "INCLUDE_PRIVATE set but GITHUB_TOKEN not provided" });
   }
 
   const fetchPromise = (async (): Promise<ApiResponse> => {
@@ -87,70 +116,73 @@ app.get('/', async (req: Request, res: Response) => {
         config.githubUsername,
         config.githubToken,
         config.includePrivate,
-        config.cacheTtlSeconds
-      )
-      cache.set(key, stats)
-      cache.saveToDisk(key)
-      return stats
+        config.cacheTtlSeconds,
+      );
+      cache.set(key, stats);
+      cache.saveToDisk(key);
+      return stats;
     } finally {
-      cache.clearInFlight(key)
+      cache.clearInFlight(key);
     }
-  })()
+  })();
 
-  cache.setInFlight(key, fetchPromise)
-  logger.info('Cache miss, fetching data', { key })
+  cache.setInFlight(key, fetchPromise);
+  logger.info("Cache miss, fetching data", { key });
 
   try {
-    const data = await fetchPromise
-    return res.json(data)
+    const data = await fetchPromise;
+    return res.json(data);
   } catch (error) {
     if (isRateLimitError(error)) {
-      const rateLimitError = error as RateLimitError
-      logger.error('GitHub rate limit exceeded', {
+      const rateLimitError = error as RateLimitError;
+      logger.error("GitHub rate limit exceeded", {
         retryAfter: rateLimitError.retryAfter,
         resetTime: rateLimitError.resetTime,
-      })
+      });
 
-      const staleCache = cache.get(key)
+      const staleCache = cache.get(key);
       if (staleCache) {
-        logger.warn('Rate limited, returning stale cache', { key })
-        return res.json(withCachedMeta(staleCache, 0))
+        logger.warn("Rate limited, returning stale cache", { key });
+        return res.json(withCachedMeta(staleCache, 0));
       }
 
       if (rateLimitError.retryAfter) {
-        res.set('Retry-After', String(rateLimitError.retryAfter))
+        res.set("Retry-After", String(rateLimitError.retryAfter));
       } else if (rateLimitError.resetTime) {
-        const retryAfter = Math.max(0, rateLimitError.resetTime - Math.floor(Date.now() / 1000))
-        res.set('Retry-After', String(retryAfter))
+        const retryAfter = Math.max(
+          0,
+          rateLimitError.resetTime - Math.floor(Date.now() / 1000),
+        );
+        res.set("Retry-After", String(retryAfter));
       }
 
-      return res.status(429).json({ error: 'GitHub API rate limit exceeded' })
+      return res.status(429).json({ error: "GitHub API rate limit exceeded" });
     }
 
-    logger.error('Failed to fetch GitHub data', { error: String(error) })
+    logger.error("Failed to fetch GitHub data", { error: String(error) });
 
-    const staleCache = cache.get(key)
+    const staleCache = cache.get(key);
     if (staleCache) {
-      logger.warn('Fetch failed, returning stale cache', { key })
-      return res.json(withCachedMeta(staleCache, 0))
+      logger.warn("Fetch failed, returning stale cache", { key });
+      return res.json(withCachedMeta(staleCache, 0));
     }
 
-    return res.status(500).json({ error: 'Failed to fetch GitHub data' })
+    return res.status(500).json({ error: "Failed to fetch GitHub data" });
   }
-})
+});
 
-app.get('/healthz', (req: Request, res: Response) => {
-  res.send('ok')
-})
+app.get("/healthz", (req: Request, res: Response) => {
+  res.send("ok");
+});
 
 app.use((req: Request, res: Response) => {
-  res.status(404).json({ error: 'Not found' })
-})
+  res.status(404).json({ error: "Not found" });
+});
 
 app.listen(config.port, () => {
   logger.info(`Server listening on port ${config.port}`, {
-    username: config.githubUsername || '(not set)',
+    username: config.githubUsername || "(not set)",
     cacheTtl: config.cacheTtlSeconds,
     hasToken: !!config.githubToken,
-  })
-})
+  });
+});

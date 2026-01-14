@@ -1,101 +1,104 @@
-import * as cron from 'node-cron'
-import { CacheManager } from './cache'
-import { fetchFullStats } from './github'
-import { logger } from './logger'
-import { Config } from './config'
+import * as cron from "node-cron";
+import { CacheManager } from "./cache";
+import { fetchFullStats } from "./github";
+import { logger } from "./logger";
+import { Config } from "./config";
 
 export class DataScheduler {
-  private config: Config
-  private cache: CacheManager
-  private tasks: cron.ScheduledTask[] = []
+  private config: Config;
+  private cache: CacheManager;
+  private tasks: cron.ScheduledTask[] = [];
 
   constructor(config: Config, cache: CacheManager) {
-    this.config = config
-    this.cache = cache
+    this.config = config;
+    this.cache = cache;
   }
 
   start(): void {
     if (this.config.targetUsernames.length === 0) {
-      logger.warn('No target usernames configured, scheduler not started')
-      return
+      logger.warn("No target usernames configured, scheduler not started");
+      return;
     }
 
-    const midnightTask = cron.schedule('0 0 * * *', () => {
-      this.fetchAllUserData('midnight')
-    }, {
-      timezone: 'Asia/Tokyo'
-    })
+    const everyThreeHoursTask = cron.schedule(
+      "0 */3 * * *",
+      () => {
+        this.fetchAllUserData("scheduled");
+      },
+      {
+        timezone: "Asia/Tokyo",
+      },
+    );
 
-    const noonTask = cron.schedule('0 12 * * *', () => {
-      this.fetchAllUserData('noon')
-    }, {
-      timezone: 'Asia/Tokyo'
-    })
+    this.tasks.push(everyThreeHoursTask);
 
-    this.tasks.push(midnightTask, noonTask)
-
-    logger.info('Scheduler started', {
+    logger.info("Scheduler started", {
       targetUsernames: this.config.targetUsernames,
-      schedules: ['00:00 JST', '12:00 JST'],
-    })
+      schedules: [
+        "Every 3 hours (00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00 JST)",
+      ],
+    });
 
-    this.fetchAllUserData('startup')
+    this.fetchAllUserData("startup");
   }
 
   stop(): void {
-    this.tasks.forEach(task => task.stop())
-    this.tasks = []
-    logger.info('Scheduler stopped')
+    this.tasks.forEach((task) => task.stop());
+    this.tasks = [];
+    logger.info("Scheduler stopped");
   }
 
   private async fetchAllUserData(trigger: string): Promise<void> {
-    logger.info('Starting scheduled data fetch', {
+    logger.info("Starting scheduled data fetch", {
       trigger,
       userCount: this.config.targetUsernames.length,
-    })
+    });
 
-    const startTime = Date.now()
-    let successCount = 0
-    let failureCount = 0
+    const startTime = Date.now();
+    let successCount = 0;
+    let failureCount = 0;
 
     for (const username of this.config.targetUsernames) {
       try {
-        logger.info('Fetching data for user', { username, trigger })
+        logger.info("Fetching data for user", { username, trigger });
 
         const stats = await fetchFullStats(
           username,
           this.config.githubToken,
           this.config.includePrivate,
-          this.config.cacheTtlSeconds
-        )
+          this.config.cacheTtlSeconds,
+        );
 
-        this.cache.set(username, stats)
-        this.cache.saveToDisk(username)
+        this.cache.set(username, stats);
+        this.cache.saveToDisk(username);
 
-        successCount++
-        logger.info('Successfully fetched and cached data', { username, trigger })
+        successCount++;
+        logger.info("Successfully fetched and cached data", {
+          username,
+          trigger,
+        });
 
         if (this.config.targetUsernames.length > 1) {
-          await new Promise(resolve => setTimeout(resolve, 2000))
+          await new Promise((resolve) => setTimeout(resolve, 2000));
         }
       } catch (error) {
-        failureCount++
-        logger.error('Failed to fetch data for user', {
+        failureCount++;
+        logger.error("Failed to fetch data for user", {
           username,
           trigger,
           error: String(error),
-        })
+        });
 
-        continue
+        continue;
       }
     }
 
-    const elapsed = Date.now() - startTime
-    logger.info('Scheduled data fetch completed', {
+    const elapsed = Date.now() - startTime;
+    logger.info("Scheduled data fetch completed", {
       trigger,
       successCount,
       failureCount,
       elapsedMs: elapsed,
-    })
+    });
   }
 }
