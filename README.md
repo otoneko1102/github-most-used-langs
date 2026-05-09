@@ -52,7 +52,7 @@ Example response:
 {
   "profile": {
     "login": "otoneko1102",
-    "html_url": "https://github.com/otoneko1102",
+    "html_url": "https://github.com/otnc",
     "avatar_url": "https://avatars.githubusercontent.com/u/...",
     "followers": 123,
     "public_repos": 42,
