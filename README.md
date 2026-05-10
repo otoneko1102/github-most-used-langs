@@ -51,7 +51,7 @@ Example response:
 ```json
 {
   "profile": {
-    "login": "otoneko1102",
+    "login": "otnc",
     "html_url": "https://github.com/otnc",
     "avatar_url": "https://avatars.githubusercontent.com/u/...",
     "followers": 123,
